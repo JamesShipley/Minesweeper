@@ -1,5 +1,74 @@
 import pygame,random,time,threading
 from timer_py import timer
+
+def second(x):
+    return x[1]
+
+def comb(spaces,bombs,so_far=""):
+    if not spaces:
+        if bombs:
+            return []
+        return [so_far]
+    sp = comb(spaces-1,bombs,so_far+"0")
+    bo = comb(spaces-1,bombs-1,so_far+"1") if bombs else []
+    return sp + bo 
+
+class cluster:
+    def __init__(self,center,coords,n_bombs):
+        self.center = center
+        self.cluster_coords = coords
+        self.num_bombs = n_bombs
+        self.num_spaces = len(self.cluster_coords)
+        self.combinations = comb(self.num_spaces,self.num_bombs)
+        self.valid = {}
+  
+    def is_consistent(self,other,our_index,their_index):
+        our_code,their_code = self.combinations[our_index],other.combinations[their_index]
+        consistencies = []
+        for (i,pos) in enumerate(self.cluster_coords):
+            if pos in other.cluster_coords:
+                consistencies.append((i,other.cluster_coords.index(pos)))
+        return all([our_code[i]==their_code[j] for i,j in consistencies])
+
+    def analyse(self):
+        combs = [self.combinations[i] for i in self.valid.keys()]
+        if not combs:
+            return [],[]
+        reveals,flags = [],[]
+        for i in range(self.num_spaces):
+            for res in ["1","0"]:
+                if all([c[i]==res for c in combs]):
+                    if res=="1":
+                        flags.append(self.cluster_coords[i])
+                    else:
+                        reveals.append(self.cluster_coords[i])
+        return flags,reveals
+
+    def predict(self):
+        combs = [self.combinations[i] for i in self.valid.keys()]
+        return max([(self.cluster_coords[x],sum(c[x]=="0" for c in combs)/len(combs)) for x in range(self.num_spaces)],key=second)
+    
+            
+
+    @staticmethod
+    def make_chain(all_clusters):
+        
+        chains = [[i] for i in range(len(all_clusters[0].combinations))]
+        for (i,cluster) in enumerate(all_clusters[1:],start=1):
+            new_chains = []
+            for prev_chain in chains:
+                for our_index in range(len(cluster.combinations)):
+                    if all([cluster.is_consistent(all_clusters[x],our_index,prev_chain[x]) for x in range(i)]):
+                        new_chains.append(prev_chain +[our_index])
+            chains = list(new_chains)
+            
+                
+            
+        for chain in chains:
+            for i in range(len(chain)):
+                all_clusters[i].valid[chain[i]] = 1
+        print("clusters:{},chains:{}".format(len(all_clusters),len(chains)))
+                                             
 class runner:
     def __init__(self):
         self.program = None
@@ -102,21 +171,92 @@ class minesweeper:
 
     # ai functions ---------------------------------------------------------------------------
     def get_frontier(self):
-        return [(x,y) for x in range(self.width) for y in range(self.height) if any([not self.is_revealed(i,j) for i,j in self.neighbouring_positions(x,y)]) and self.is_revealed(x,y)]
+        return [(x,y) for x in range(self.width) for y in range(self.height) if any([not self.is_revealed(i,j) and not self.is_flagged(i,j) for i,j in self.neighbouring_positions(x,y)]) and self.is_revealed(x,y)]
     
-    def basic_flag_detect(self):
-        frontier = self.get_frontier()
-        candidates = []
+    def basic_flag_reveal_detect(self,frontier):
+        
+        flags,reveals = [],[]
         for (x,y) in frontier:
             near = self.neighbouring_positions(x,y)
             num_flagged = len(list(filter(lambda x:self.is_flagged(*x),near)))
             hidden =  list(filter(lambda x: not self.is_revealed(*x) and not self.is_flagged(*x),near))
             value = self.number_of(x,y) -num_flagged
+
             if value==len(hidden):
-                candidates+=hidden
-        return candidates
+                flags+=hidden
+
+            elif not value:
+                reveals+=hidden
                 
+        return flags,reveals
+
+    def making_clusters(self,frontier):
+        clusters = []
+        cluster_map = {}
+        for (x,y) in frontier:
+            near = self.neighbouring_positions(x,y)
+            num_flagged = len(list(filter(lambda x:self.is_flagged(*x),near)))
+            hidden =  list(filter(lambda x: not self.is_revealed(*x) and not self.is_flagged(*x),near))
+            value = self.number_of(x,y) -num_flagged
+            c = cluster((x,y),sorted(hidden),value)
+            clusters.append(c)
+            for coord in hidden:
+                cluster_map[coord] = (cluster_map[coord] if coord in cluster_map else []) + [c]
+            #pygame.draw.rect(self.gd, (255,255,0),(*self.pixel_position(x,y),30*self.scale,30*self.scale),2*self.scale)
+        all_chained = {c.center:0 for c in clusters}
+        while not all(all_chained.values()):
+            
+            cluster_chain = [c for c in clusters if c.center==[key for key,val in all_chained.items() if not val][0]][:1]
+            
+            while True:
+                cands = [x for c in cluster_chain for coord in c.cluster_coords for x in cluster_map[coord]]
+                added =False
+                for c in cands:
+                    if c not in cluster_chain:
+                        added=True
+                        cluster_chain.append(c)
+                        
+                if not added:
+                    break
+            
+            for x,y in map(lambda x:x.center,cluster_chain):
+                all_chained[(x,y)]=1
+            cluster.make_chain(cluster_chain)
+        flags,reveals = [],[]
+        for c in clusters:
+            f,r = c.analyse()
+            flags,reveals = flags+f,reveals+r
         
+        if not flags and not reveals:
+            rev,mark = max([x.predict() for x in clusters],key=second)
+            print("predicting a reveal of {} at {}%".format(rev,mark*100))
+            return [],[rev]
+        return flags, reveals
+            
+    def run_ai(self, hint,solve,complex_solve, slow=False):
+        frontier = self.get_frontier()
+        flags, reveals = self.basic_flag_reveal_detect(frontier)
+        if complex_solve:
+            f,r = self.making_clusters(frontier)
+            flags,reveals = flags+f,reveals+r
+            
+        if hint:
+            for colour,candidates in zip([red,green],[flags,reveals]):
+                for x,y in candidates:
+                    pygame.draw.rect(self.gd, colour,(*self.pixel_position(x,y),30*self.scale,30*self.scale),2*self.scale)
+            pygame.display.update()
+
+        if solve:
+            if not slow:
+                for pos in flags:
+                    self.flag_square(*pos,human_click=False)
+                for pos in reveals:
+                    if self.reveal_square(*pos):
+                        return "lost"
+            else:
+                if flags:self.flag_square(*flags[0],human_click=False)
+                elif reveals:self.reveal_square(*reveals[0])
+        return "won" if self.won_game() else "playing"
 
     # GUI/UI ---------------------------------------------------------------------------------
     def pixel_position(self,x,y):
@@ -173,13 +313,10 @@ class minesweeper:
             if self.reveal_square(x,y):
                 return "lost",True
         if r:
-            print("flag")
             self.flag_square(x,y)
 
-##        if m:
-##            for x,y in self.basic_flag_detect():
-##                pygame.draw.rect(self.gd,(255,0,0),(*self.pixel_position(x,y),30,30),3)
-##            return "playing",False
+        if m:
+            return "playing",True
 
 
         if self.won_game():
@@ -202,18 +339,24 @@ class minesweeper:
     def run(self):
         self.start()
         state = "playing"
-        t = timer().start()
-        count = 0
+    
         while state=="playing":
             state,change = self.run_main_game()
-            if change and not self.displaying:
-                #threading.Thread(target=self.display).start()
-                pygame.display.update()
-            count+=1
-            if t.get_elapsed()>=1:
-                print(count)
-                t.reset()
-                count = 0
+            pressed = list(pygame.key.get_pressed())
+            k_pressed = [pressed[keys[x]] for x in ["hint","solve","complex solve","show_frontier","display"]]
+
+            if any(k_pressed[:-2]):
+                state = self.run_ai(*k_pressed[:-2])
+
+            if k_pressed[-2]:
+                for (x,y) in self.get_frontier():
+                    pygame.draw.rect(self.gd, blue,(*self.pixel_position(x,y),30*self.scale,30*self.scale),2*self.scale)
+
+            if k_pressed[-1]:
+                self.display()
+
+            pygame.display.update()
+            
             
         if state=="lost":
             print("lost")
@@ -247,7 +390,22 @@ class minesweeper:
         
     # ---------------------------------------------------
 
+red = (255,0,0)
+green = (0,255,0)
+blue = (0,0,255)
+
+keys = {"hint":11, "solve":22, "complex solve":225, "show_frontier":9,"display":7}
+# Press H for a Hint, S to solve, and Hold down Shift for a complex hint/solve.
+
 if __name__=="__main__":       
     pygame.init()
+    
     game = minesweeper()
+##    while True:
+##        pygame.event.get()
+##        res = [(i,x) for (i,x) in enumerate(list(pygame.key.get_pressed())) if x]
+##        if res:
+##            print(res)
+##            pressed = list(pygame.key.get_pressed())
+##            print([pressed[keys[x]] for x in ["hint","solve","complex solve"]])
     runner().run(game.run).forever()
